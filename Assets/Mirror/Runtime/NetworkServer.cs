@@ -237,10 +237,10 @@ namespace Mirror
         /// <param name="msg">Message structure.</param>
         /// <param name="channelId">Transport channel to use</param>
         /// <returns></returns>
-        public bool SendToAll<T>(T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
+        public void SendToAll<T>(T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
             if (LogFilter.Debug) Debug.Log("Server.SendToAll id:" + typeof(T));
-            return NetworkConnection.Send(connections.Values, msg, channelId);
+            NetworkConnection.Send(connections.Values, msg, channelId);
         }
 
         /// <summary>
@@ -253,7 +253,7 @@ namespace Mirror
         /// <param name="includeOwner">Send to observers including self..</param>
         /// <param name="channelId">Transport channel to use</param>
         /// <returns></returns>
-        public bool SendToReady<T>(NetworkIdentity identity, T msg, bool includeOwner = true, int channelId = Channels.DefaultReliable) where T : IMessageBase
+        public void SendToReady<T>(NetworkIdentity identity, T msg, bool includeOwner = true, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
             if (LogFilter.Debug) Debug.Log("Server.SendToReady msgType:" + typeof(T));
 
@@ -261,7 +261,6 @@ namespace Mirror
            
             foreach (NetworkConnection connection in identity.observers)
             {
-                
                 bool isOwner = connection == identity.connectionToClient;
                 if ((!isOwner || includeOwner) && connection.isReady)
                 {
@@ -269,7 +268,7 @@ namespace Mirror
                 }
             }
 
-            return NetworkConnection.Send(connectionsCache, msg, channelId);
+            NetworkConnection.Send(connectionsCache, msg, channelId);
         }
 
         /// <summary>
@@ -281,9 +280,9 @@ namespace Mirror
         /// <param name="msg">Message structure.</param>
         /// <param name="channelId">Transport channel to use</param>
         /// <returns></returns>
-        public bool SendToReady<T>(NetworkIdentity identity, T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
+        public void SendToReady<T>(NetworkIdentity identity, T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
-            return SendToReady(identity, msg, true, channelId);
+            SendToReady(identity, msg, true, channelId);
         }
 
         /// <summary>
