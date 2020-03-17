@@ -71,30 +71,14 @@ namespace Mirror
         private NetworkServer hostServer;
 
         /// <summary>
+        /// Transport to use to connect to server
+        /// </summary>
+        public Transport2 Transport;
+
+        /// <summary>
         /// NetworkClient can connect to local server in host mode too
         /// </summary>
         public bool isLocalClient => hostServer != null;
-
-        /// <summary>
-        /// Connect client to a NetworkServer instance.
-        /// </summary>
-        /// <param name="address"></param>
-        public async Task ConnectAsync(string serverIp)
-        {
-            if (LogFilter.Debug) Debug.Log("Client Connect: " + serverIp);
-
-            RegisterSystemHandlers(false);
-            Transport.activeTransport.enabled = true;
-            InitializeTransportHandlers();
-
-            connectState = ConnectState.Connecting;
-            await Transport.activeTransport.ClientConnectAsync(serverIp);
-
-            // setup all the handlers
-            connection = new NetworkConnectionToServer();
-            connection.SetHandlers(handlers);
-            OnConnected();
-        }
 
         /// <summary>
         /// Connect client to a NetworkServer instance.
@@ -105,14 +89,12 @@ namespace Mirror
             if (LogFilter.Debug) Debug.Log("Client Connect: " + uri);
 
             RegisterSystemHandlers(false);
-            Transport.activeTransport.enabled = true;
-            InitializeTransportHandlers();
 
             connectState = ConnectState.Connecting;
-            await Transport.activeTransport.ClientConnectAsync(uri);
+            IConnection transportConnection = await Transport.ConnectAsync(uri);
 
             // setup all the handlers
-            connection = new NetworkConnectionToServer();
+            connection = new NetworkConnectionToServer(transportConnection);
             connection.SetHandlers(handlers);
             OnConnected();
         }
@@ -148,13 +130,6 @@ namespace Mirror
             server.localConnection.Send(new ConnectMessage());
         }
 
-        void InitializeTransportHandlers()
-        {
-            Transport.activeTransport.OnClientDataReceived.AddListener(OnDataReceived);
-            Transport.activeTransport.OnClientDisconnected.AddListener(OnDisconnected);
-            Transport.activeTransport.OnClientError.AddListener(OnError);
-        }
-
         void OnError(Exception exception)
         {
             Debug.LogException(exception);
@@ -169,15 +144,6 @@ namespace Mirror
             connection?.InvokeHandler(new DisconnectMessage(), -1);
         }
 
-        internal void OnDataReceived(ArraySegment<byte> data, int channelId)
-        {
-            if (connection != null)
-            {
-                connection.TransportReceive(data, channelId);
-            }
-            else Debug.LogError("Skipped Data message handling because connection is null.");
-        }
-
         void OnConnected()
         {
             // reset network time stats
@@ -187,7 +153,6 @@ namespace Mirror
             // thus we should set the connected state before calling the handler
             connectState = ConnectState.Connected;
             Time.UpdateClient(this);
-            connection.InvokeHandler(new ConnectMessage(), -1);
         }
 
         /// <summary>
@@ -215,20 +180,10 @@ namespace Mirror
                     connection.Disconnect();
                     connection.Dispose();
                     connection = null;
-                    RemoveTransportHandlers();
                 }
             }
         }
 
-        void RemoveTransportHandlers()
-        {
-            // so that we don't register them more than once
-            Transport.activeTransport.OnClientDataReceived.RemoveListener(OnDataReceived);
-            Transport.activeTransport.OnClientDisconnected.RemoveListener(OnDisconnected);
-            Transport.activeTransport.OnClientError.RemoveListener(OnError);
-        }
-
-        // Deprecated 03/03/2019
         /// <summary>
         /// This sends a network message with a message Id to the server. This message is sent on channel zero, which by default is the reliable channel.
         /// <para>The message must be an instance of a class derived from MessageBase.</para>
@@ -240,16 +195,7 @@ namespace Mirror
         /// <returns>True if message was sent.</returns>
         public void Send<T>(T message, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
-            if (connection != null)
-            {
-                if (connectState != ConnectState.Connected)
-                {
-                    throw new ConnectionException("NetworkClient Send when not connected to a server");
-                }
-                connection.Send(message, channelId);
-            }
-
-            throw new ConnectionException("NetworkClient Send with no connection");
+            connection.Send(message, channelId);
         }
 
         internal void Update()
@@ -354,7 +300,7 @@ namespace Mirror
             // we do NOT call Transport.Shutdown, because someone only called
             // NetworkClient.Shutdown. we can't assume that the server is
             // supposed to be shut down too!
-            Transport.activeTransport.ClientDisconnect();
+            connection.Disconnect();
         }
     }
 }

@@ -1,9 +1,12 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using NSubstitute;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
+using static Mirror.Tests.AsyncTests;
 
 namespace Mirror.Tests
 {
@@ -60,7 +63,7 @@ namespace Mirror.Tests
     }
 
     [TestFixture]
-    public class NetworkServerTest
+    public class NetworkServerTest 
     {
         NetworkServer server;
         GameObject serverGO;
@@ -70,12 +73,16 @@ namespace Mirror.Tests
         GameObject gameObject;
         NetworkIdentity identity;
 
-        [SetUp]
-        public void SetUp()
+        NetworkConnectionToClient conn42;
+        NetworkConnectionToClient conn43;
+
+        [UnitySetUp]
+        public IEnumerator SetUp()
         {
-            Transport.activeTransport = Substitute.For<Transport>();
             serverGO = new GameObject();
+            Tcp2.Tcp2Transport transport = serverGO.AddComponent<Tcp2.Tcp2Transport>();
             server = serverGO.AddComponent<NetworkServer>();
+            server.Transport2 = transport;
 
             clientGO = new GameObject();
             client = clientGO.AddComponent<NetworkClient>();
@@ -83,27 +90,36 @@ namespace Mirror.Tests
             gameObject = new GameObject();
             identity = gameObject.AddComponent<NetworkIdentity>();
 
+            conn42 = new NetworkConnectionToClient(Substitute.For<IConnection>());
+            conn43 = new NetworkConnectionToClient(Substitute.For<IConnection>());
+
+            return RunAsync(async () =>
+           {
+               await server.ListenAsync(2);
+           });
+
         }
 
         [TearDown]
         public void TearDown()
         {
-            GameObject.DestroyImmediate(gameObject);
+            UnityEngine.Object.DestroyImmediate(gameObject);
 
             // reset all state
             server.Shutdown();
-            GameObject.DestroyImmediate(serverGO);
-            GameObject.DestroyImmediate(clientGO);
-            Transport.activeTransport = null;
+            UnityEngine.Object.DestroyImmediate(serverGO);
+            UnityEngine.Object.DestroyImmediate(clientGO);
+        }
 
-
+        [Test]
+        public void NoConnections()
+        {
+            Assert.That(server.connections, Is.Empty);
         }
 
         [Test]
         public void IsActiveTest()
         {
-            Assert.That(server.active, Is.False);
-            server.Listen(1);
             Assert.That(server.active, Is.True);
             server.Shutdown();
             Assert.That(server.active, Is.False);
@@ -112,15 +128,6 @@ namespace Mirror.Tests
         [Test]
         public void MaxConnectionsTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen with maxconnections=1
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // connect first: should work
             Transport.activeTransport.OnServerConnected.Invoke(42);
             Assert.That(server.connections.Count, Is.EqualTo(1));
@@ -131,133 +138,57 @@ namespace Mirror.Tests
         }
 
         [Test]
-        public void ConnectMessageHandlerTest()
-        {
-            // message handlers
-            bool connectCalled = false;
-            server.RegisterHandler<ConnectMessage>((conn, msg) => { connectCalled = true; }, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(connectCalled, Is.False);
-
-            // connect
-            Transport.activeTransport.OnServerConnected.Invoke(42);
-            Assert.That(connectCalled, Is.True);
-        }
-
-        [Test]
-        public void DisconnectMessageHandlerTest()
-        {
-            // message handlers
-            bool disconnectCalled = false;
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => { disconnectCalled = true; }, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(disconnectCalled, Is.False);
-
-            // connect
-            Transport.activeTransport.OnServerConnected.Invoke(42);
-            Assert.That(disconnectCalled, Is.False);
-
-            // disconnect
-            Transport.activeTransport.OnServerDisconnected.Invoke(42);
-            Assert.That(disconnectCalled, Is.True);
-        }
-
-        [Test]
         public void ConnectionsDictTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(2);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // connect first
             Transport.activeTransport.OnServerConnected.Invoke(42);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
-            Assert.That(server.connections.ContainsKey(42), Is.True);
+            Assert.That(server.connections, Has.Count.EqualTo(1));
 
             // connect second
             Transport.activeTransport.OnServerConnected.Invoke(43);
-            Assert.That(server.connections.Count, Is.EqualTo(2));
-            Assert.That(server.connections.ContainsKey(43), Is.True);
+            Assert.That(server.connections, Has.Count.EqualTo(2));
 
             // disconnect second
             Transport.activeTransport.OnServerDisconnected.Invoke(43);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
-            Assert.That(server.connections.ContainsKey(42), Is.True);
+            Assert.That(server.connections, Has.Count.EqualTo(1));
 
             // disconnect first
             Transport.activeTransport.OnServerDisconnected.Invoke(42);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            Assert.That(server.connections, Is.Empty);
         }
 
         [Test]
         public void OnConnectedOnlyAllowsGreaterZeroConnectionIdsTest()
         {
-            // OnConnected should only allow connectionIds >= 0
-            // 0 is for local player
-            // <0 is never used
-
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(2);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // connect 0
             // (it will show an error message, which is expected)
             LogAssert.ignoreFailingMessages = true;
             Transport.activeTransport.OnServerConnected.Invoke(0);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            Assert.That(server.connections, Is.Empty);
 
             // connect <0
             Transport.activeTransport.OnServerConnected.Invoke(-1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            Assert.That(server.connections, Is.Empty);
             LogAssert.ignoreFailingMessages = false;
         }
 
         [Test]
         public void ConnectDuplicateConnectionIdsTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(2);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // connect first
             Transport.activeTransport.OnServerConnected.Invoke(42);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
-            NetworkConnectionToClient original = server.connections[42];
+            Assert.That(server.connections, Has.Count.EqualTo(1));
+            NetworkConnectionToClient original = server.connections.First();
 
             // connect duplicate - shouldn't overwrite first one
             Transport.activeTransport.OnServerConnected.Invoke(42);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
-            Assert.That(server.connections[42], Is.EqualTo(original));
+            Assert.That(server.connections, Is.EquivalentTo(new[] { original }));
         }
 
         [Test]
         public void LocalClientActiveTest()
         {
-            // listen
-            server.Listen(1);
+
             Assert.That(server.LocalClientActive, Is.False);
 
             client.ConnectHost(server);
@@ -270,150 +201,68 @@ namespace Mirror.Tests
         [Test]
         public void AddConnectionTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add first connection
-            NetworkConnectionToClient conn42 = new NetworkConnectionToClient(42);
-            bool result42 = server.AddConnection(conn42);
-            Assert.That(result42, Is.True);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
-            Assert.That(server.connections.ContainsKey(42), Is.True);
-            Assert.That(server.connections[42], Is.EqualTo(conn42));
+            server.AddConnection(conn42);
+            Assert.That(server.connections, Is.EquivalentTo ( new[] { conn42 }));
 
             // add second connection
-            NetworkConnectionToClient conn43 = new NetworkConnectionToClient(43);
-            bool result43 = server.AddConnection(conn43);
-            Assert.That(result43, Is.True);
-            Assert.That(server.connections.Count, Is.EqualTo(2));
-            Assert.That(server.connections.ContainsKey(42), Is.True);
-            Assert.That(server.connections[42], Is.EqualTo(conn42));
-            Assert.That(server.connections.ContainsKey(43), Is.True);
-            Assert.That(server.connections[43], Is.EqualTo(conn43));
+            server.AddConnection(conn43);
+            Assert.That(server.connections, Is.EquivalentTo(new[] { conn42, conn43 }));
 
             // add duplicate connectionId
-            NetworkConnectionToClient connDup = new NetworkConnectionToClient(42);
-            bool resultDup = server.AddConnection(connDup);
-            Assert.That(resultDup, Is.False);
-            Assert.That(server.connections.Count, Is.EqualTo(2));
-            Assert.That(server.connections.ContainsKey(42), Is.True);
-            Assert.That(server.connections[42], Is.EqualTo(conn42));
-            Assert.That(server.connections.ContainsKey(43), Is.True);
-            Assert.That(server.connections[43], Is.EqualTo(conn43));
-        }
-
-        [Test]
-        public void RemoveConnectionTest()
-        {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
-            // add connection
-            NetworkConnectionToClient conn42 = new NetworkConnectionToClient(42);
-            bool result42 = server.AddConnection(conn42);
-            Assert.That(result42, Is.True);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
-            Assert.That(server.connections.ContainsKey(42), Is.True);
-            Assert.That(server.connections[42], Is.EqualTo(conn42));
-
-            // remove connection
-            bool resultRemove = server.RemoveConnection(42);
-            Assert.That(resultRemove, Is.True);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            server.AddConnection(conn43);
+            Assert.That(server.connections, Is.EquivalentTo(new[] { conn42, conn43 }));
         }
 
         [Test]
         public void DisconnectAllConnectionsTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add connection
-            NetworkConnectionToClient conn42 = new NetworkConnectionToClient(42);
             server.AddConnection(conn42);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
 
             // disconnect all connections
             server.DisconnectAllConnections();
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            Assert.That(server.connections, Is.Empty);
         }
 
         [Test]
         public void DisconnectAllTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             client.ConnectHost(server);
             Assert.That(server.localConnection, Is.Not.Null);
 
             // add connection
-            NetworkConnectionToClient conn42 = new NetworkConnectionToClient(42);
             server.AddConnection(conn42);
-            Assert.That(server.connections.Count, Is.EqualTo(1));
 
             // disconnect all connections and local connection
             server.DisconnectAll();
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            Assert.That(server.connections, Is.Empty);
             Assert.That(server.localConnection, Is.Null);
         }
 
         [Test]
         public void OnDataReceivedTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
             // add one custom message handler
             bool wasReceived = false;
             NetworkConnection connectionReceived = null;
-            TestMessage messageReceived = new TestMessage();
+            var messageReceived = new TestMessage();
             server.RegisterHandler<TestMessage>((conn, msg) => {
                 wasReceived = true;
                 connectionReceived = conn;
                 messageReceived = msg;
             }, false);
 
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add a connection
-            NetworkConnectionToClient connection = new NetworkConnectionToClient(42);
+            var connection = new NetworkConnectionToClient(null);
             server.AddConnection(connection);
             Assert.That(server.connections.Count, Is.EqualTo(1));
 
             // serialize a test message into an arraysegment
-            TestMessage testMessage = new TestMessage{IntValue = 13, DoubleValue = 14, StringValue = "15"};
-            NetworkWriter writer = new NetworkWriter();
+            var testMessage = new TestMessage{IntValue = 13, DoubleValue = 14, StringValue = "15"};
+            var writer = new NetworkWriter();
             MessagePacker.Pack(testMessage, writer);
-            ArraySegment<byte> segment = writer.ToArraySegment();
+            var segment = writer.ToArraySegment();
 
             // call transport.OnDataReceived
             // -> should call server.OnDataReceived
@@ -430,30 +279,22 @@ namespace Mirror.Tests
         [Test]
         public void OnDataReceivedInvalidConnectionIdTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
 
             // add one custom message handler
             bool wasReceived = false;
             NetworkConnection connectionReceived = null;
-            TestMessage messageReceived = new TestMessage();
+            var messageReceived = new TestMessage();
             server.RegisterHandler<TestMessage>((conn, msg) => {
                 wasReceived = true;
                 connectionReceived = conn;
                 messageReceived = msg;
             }, false);
 
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // serialize a test message into an arraysegment
-            TestMessage testMessage = new TestMessage{IntValue = 13, DoubleValue = 14, StringValue = "15"};
-            NetworkWriter writer = new NetworkWriter();
+            var testMessage = new TestMessage{IntValue = 13, DoubleValue = 14, StringValue = "15"};
+            var writer = new NetworkWriter();
             MessagePacker.Pack(testMessage, writer);
-            ArraySegment<byte> segment = writer.ToArraySegment();
+            var segment = writer.ToArraySegment();
 
             // call transport.OnDataReceived with an invalid connectionId
             // an error log is expected.
@@ -469,8 +310,10 @@ namespace Mirror.Tests
         [Test]
         public void SetClientReadyAndNotReadyTest()
         {
-            ULocalConnectionToClient connection = new ULocalConnectionToClient();
-            connection.connectionToServer = new ULocalConnectionToServer();
+            var connection = new ULocalConnectionToClient
+            {
+                connectionToServer = new ULocalConnectionToServer()
+            };
             Assert.That(connection.isReady, Is.False);
 
             server.SetClientReady(connection);
@@ -484,16 +327,20 @@ namespace Mirror.Tests
         public void SetAllClientsNotReadyTest()
         {
             // add first ready client
-            ULocalConnectionToClient first = new ULocalConnectionToClient();
-            first.connectionToServer = new ULocalConnectionToServer();
-            first.isReady = true;
-            server.connections[42] = first;
+            var first = new ULocalConnectionToClient
+            {
+                connectionToServer = new ULocalConnectionToServer(),
+                isReady = true
+            };
+            server.AddConnection(first);
 
             // add second ready client
-            ULocalConnectionToClient second = new ULocalConnectionToClient();
-            second.connectionToServer = new ULocalConnectionToServer();
-            second.isReady = true;
-            server.connections[43] = second;
+            var second = new ULocalConnectionToClient
+            {
+                connectionToServer = new ULocalConnectionToServer(),
+                isReady = true
+            };
+            server.AddConnection(second);
 
             // set all not ready
             server.SetAllClientsNotReady();
@@ -504,12 +351,8 @@ namespace Mirror.Tests
         [Test]
         public void ReadyMessageSetsClientReadyTest()
         {
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add connection
-            ULocalConnectionToClient connection = new ULocalConnectionToClient();
+            var connection = new ULocalConnectionToClient();
             connection.connectionToServer = new ULocalConnectionToServer();
             server.AddConnection(connection);
 
@@ -517,10 +360,10 @@ namespace Mirror.Tests
             connection.isAuthenticated = true;
 
             // serialize a ready message into an arraysegment
-            ReadyMessage message = new ReadyMessage();
-            NetworkWriter writer = new NetworkWriter();
+            var message = new ReadyMessage();
+            var writer = new NetworkWriter();
             MessagePacker.Pack(message, writer);
-            ArraySegment<byte> segment = writer.ToArraySegment();
+            var segment = writer.ToArraySegment();
 
             // call transport.OnDataReceived with the message
             // -> calls server.OnClientReadyMessage
@@ -535,7 +378,7 @@ namespace Mirror.Tests
         public void ActivateHostSceneCallsOnStartClient()
         {
             // add an identity with a networkbehaviour to .spawned
-            GameObject go = new GameObject();
+            var go = new GameObject();
             NetworkIdentity identity = go.AddComponent<NetworkIdentity>();
             identity.netId = 42;
             //identity.connectionToClient = connection; // for authority check
@@ -556,23 +399,14 @@ namespace Mirror.Tests
             // otherwise isServer is true in OnDestroy, which means it would try
             // to call Destroy(go). but we need to use DestroyImmediate in
             // Editor
-            GameObject.DestroyImmediate(go);
+            UnityEngine.Object.DestroyImmediate(go);
         }
 
         [Test]
         public void SendToAllTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add connection
-            ULocalConnectionToClient connection = new ULocalConnectionToClient();
+            var connection = new ULocalConnectionToClient();
             connection.connectionToServer = new ULocalConnectionToServer();
             // set a client handler
             int called = 0;
@@ -583,7 +417,7 @@ namespace Mirror.Tests
             server.AddConnection(connection);
 
             // create a message
-            TestMessage message = new TestMessage{ IntValue = 1, DoubleValue = 2, StringValue = "3" };
+            var message = new TestMessage{ IntValue = 1, DoubleValue = 2, StringValue = "3" };
 
             // send it to all
             server.SendToAll(message);
@@ -597,11 +431,6 @@ namespace Mirror.Tests
         [Test]
         public void RegisterUnregisterClearHandlerTest()
         {
-            // message handlers that are needed for the test
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
 
             // RegisterHandler(conn, msg) variant
             int variant1Called = 0;
@@ -611,17 +440,13 @@ namespace Mirror.Tests
             int variant2Called = 0;
             server.RegisterHandler<WovenTestMessage>(msg => { ++variant2Called; }, false);
 
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add a connection
-            NetworkConnectionToClient connection = new NetworkConnectionToClient(42);
+            var connection = new NetworkConnectionToClient(null);
             server.AddConnection(connection);
             Assert.That(server.connections.Count, Is.EqualTo(1));
 
             // serialize first message, send it to server, check if it was handled
-            NetworkWriter writer = new NetworkWriter();
+            var writer = new NetworkWriter();
             MessagePacker.Pack(new TestMessage(), writer);
             Transport.activeTransport.OnServerDataReceived.Invoke(42, writer.ToArraySegment(), 0);
             Assert.That(variant1Called, Is.EqualTo(1));
@@ -665,17 +490,8 @@ namespace Mirror.Tests
         [Test]
         public void SendToClientOfPlayer()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add connection
-            ULocalConnectionToClient connection = new ULocalConnectionToClient();
+            var connection = new ULocalConnectionToClient();
             connection.connectionToServer = new ULocalConnectionToServer();
             // set a client handler
             int called = 0;
@@ -686,7 +502,7 @@ namespace Mirror.Tests
             server.AddConnection(connection);
 
             // create a message
-            TestMessage message = new TestMessage{ IntValue = 1, DoubleValue = 2, StringValue = "3" };
+            var message = new TestMessage{ IntValue = 1, DoubleValue = 2, StringValue = "3" };
 
             // create a gameobject and networkidentity
             NetworkIdentity identity = new GameObject().AddComponent<NetworkIdentity>();
@@ -702,14 +518,14 @@ namespace Mirror.Tests
             Assert.That(called, Is.EqualTo(1));
             // destroy GO after shutdown, otherwise isServer is true in OnDestroy and it tries to call
             // GameObject.Destroy (but we need DestroyImmediate in Editor)
-            GameObject.DestroyImmediate(identity.gameObject);
+            UnityEngine.Object.DestroyImmediate(identity.gameObject);
         }
 
         [Test]
         public void GetNetworkIdentity()
         {
             // create a GameObject with NetworkIdentity
-            GameObject go = new GameObject();
+            var go = new GameObject();
             NetworkIdentity identity = go.AddComponent<NetworkIdentity>();
 
             // GetNetworkIdentity
@@ -718,7 +534,7 @@ namespace Mirror.Tests
             Assert.That(value, Is.EqualTo(identity));
 
             // create a GameObject without NetworkIdentity
-            GameObject goWithout = new GameObject();
+            var goWithout = new GameObject();
 
             // GetNetworkIdentity for GO without identity
             // (error log is expected)
@@ -729,24 +545,15 @@ namespace Mirror.Tests
             LogAssert.ignoreFailingMessages = false;
 
             // clean up
-            GameObject.DestroyImmediate(go);
-            GameObject.DestroyImmediate(goWithout);
+            UnityEngine.Object.DestroyImmediate(go);
+            UnityEngine.Object.DestroyImmediate(goWithout);
         }
 
         [Test]
         public void ShowForConnection()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add connection
-            ULocalConnectionToClient connection = new ULocalConnectionToClient();
+            var connection = new ULocalConnectionToClient();
             connection.isReady = true; // required for ShowForConnection
             connection.connectionToServer = new ULocalConnectionToServer();
             // set a client handler
@@ -777,25 +584,18 @@ namespace Mirror.Tests
             Assert.That(called, Is.EqualTo(1)); // not 2 but 1 like before?
             // destroy GO after shutdown, otherwise isServer is true in OnDestroy and it tries to call
             // GameObject.Destroy (but we need DestroyImmediate in Editor)
-            GameObject.DestroyImmediate(identity.gameObject);
+            UnityEngine.Object.DestroyImmediate(identity.gameObject);
         }
 
         [Test]
         public void HideForConnection()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
-            Assert.That(server.connections.Count, Is.EqualTo(0));
-
             // add connection
-            ULocalConnectionToClient connection = new ULocalConnectionToClient();
-            connection.isReady = true; // required for ShowForConnection
-            connection.connectionToServer = new ULocalConnectionToServer();
+            var connection = new ULocalConnectionToClient
+            {
+                isReady = true, // required for ShowForConnection
+                connectionToServer = new ULocalConnectionToServer()
+            };
             // set a client handler
             int called = 0;
             connection.connectionToServer.SetHandlers(new Dictionary<int,NetworkMessageDelegate>()
@@ -818,14 +618,14 @@ namespace Mirror.Tests
             Assert.That(called, Is.EqualTo(1));
             // destroy GO after shutdown, otherwise isServer is true in OnDestroy and it tries to call
             // GameObject.Destroy (but we need DestroyImmediate in Editor)
-            GameObject.DestroyImmediate(identity.gameObject);
+            UnityEngine.Object.DestroyImmediate(identity.gameObject);
         }
 
         [Test]
         public void ValidateSceneObject()
         {
             // create a gameobject and networkidentity
-            GameObject go = new GameObject();
+            var go = new GameObject();
             NetworkIdentity identity = go.AddComponent<NetworkIdentity>();
             identity.sceneId = 42;
 
@@ -844,20 +644,20 @@ namespace Mirror.Tests
             Assert.That(server.ValidateSceneObject(identity), Is.False);
 
             // clean up
-            GameObject.DestroyImmediate(go);
+            UnityEngine.Object.DestroyImmediate(go);
         }
 
         [Test]
         public void SpawnObjects()
         {
             // create a gameobject and networkidentity that lives in the scene(=has sceneid)
-            GameObject go = new GameObject("Test");
+            var go = new GameObject("Test");
             NetworkIdentity identity = go.AddComponent<NetworkIdentity>();
             identity.sceneId = 42; // lives in the scene from the start
             go.SetActive(false); // unspawned scene objects are set to inactive before spawning
 
             // create a gameobject that looks like it was instantiated and doesn't live in the scene
-            GameObject go2 = new GameObject("Test2");
+            var go2 = new GameObject("Test2");
             NetworkIdentity identity2 = go2.AddComponent<NetworkIdentity>();
             identity2.sceneId = 0; // not a scene object
             go2.SetActive(false); // unspawned scene objects are set to inactive before spawning
@@ -865,8 +665,6 @@ namespace Mirror.Tests
             // calling SpawnObjects while server isn't active should do nothing
             Assert.That(server.SpawnObjects(), Is.False);
 
-            // start server
-            server.Listen(1);
 
             // calling SpawnObjects while server is active should succeed
             Assert.That(server.SpawnObjects(), Is.True);
@@ -874,15 +672,15 @@ namespace Mirror.Tests
             // was the scene object activated, and the runtime one wasn't?
             Assert.That(go.activeSelf, Is.True);
             Assert.That(go2.activeSelf, Is.False);
-            GameObject.DestroyImmediate(go);
-            GameObject.DestroyImmediate(go2);
+            UnityEngine.Object.DestroyImmediate(go);
+            UnityEngine.Object.DestroyImmediate(go2);
         }
 
         [Test]
         public void UnSpawn()
         {
             // create a gameobject and networkidentity that lives in the scene(=has sceneid)
-            GameObject go = new GameObject("Test");
+            var go = new GameObject("Test");
             NetworkIdentity identity = go.AddComponent<NetworkIdentity>();
             OnNetworkDestroyTestNetworkBehaviour comp = go.AddComponent<OnNetworkDestroyTestNetworkBehaviour>();
             identity.sceneId = 42; // lives in the scene from the start
@@ -896,7 +694,7 @@ namespace Mirror.Tests
             Assert.That(identity.IsMarkedForReset(), Is.True);
 
             // clean up
-            GameObject.DestroyImmediate(go);
+            UnityEngine.Object.DestroyImmediate(go);
         }
 
         [Test]
@@ -958,13 +756,6 @@ namespace Mirror.Tests
         [Test]
         public void ShutdownCleanupTest()
         {
-            // message handlers
-            server.RegisterHandler<ConnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<DisconnectMessage>((conn, msg) => {}, false);
-            server.RegisterHandler<ErrorMessage>((conn, msg) => {}, false);
-
-            // listen
-            server.Listen(1);
             Assert.That(server.active, Is.True);
 
 
@@ -980,7 +771,7 @@ namespace Mirror.Tests
             server.Shutdown();
 
             // state cleared?
-            Assert.That(server.connections.Count, Is.EqualTo(0));
+            Assert.That(server.connections, Is.Empty);
             Assert.That(server.active, Is.False);
             Assert.That(server.localConnection, Is.Null);
             Assert.That(server.LocalClientActive, Is.False);

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Mirror.Tcp;
+using Mirror.Tcp2;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
@@ -88,7 +90,7 @@ namespace Mirror
         [Header("Network Info")]
         [Tooltip("Transport component attached to this object that server and client will use to connect")]
         [SerializeField]
-        protected Transport transport;
+        protected Transport2 transport;
 
         /// <summary>
         /// The maximum number of concurrent network connections to support.
@@ -136,7 +138,7 @@ namespace Mirror
         /// Number of active player objects across all connections on the server.
         /// <para>This is only valid on the host / server.</para>
         /// </summary>
-        public int numPlayers => server.connections.Count(kv => kv.Value.identity != null);
+        public int numPlayers => server.connections.Count(kv => kv.identity != null);
 
         /// <summary>
         /// True if the server or client is started and running
@@ -179,10 +181,10 @@ namespace Mirror
             if (transport == null)
             {
                 // was a transport added yet? if not, add one
-                transport = GetComponent<Transport>();
+                transport = GetComponent<Transport2>();
                 if (transport == null)
                 {
-                    transport = gameObject.AddComponent<TcpTransport>();
+                    transport = gameObject.AddComponent<Tcp2Transport>();
                     Debug.Log("NetworkManager: added default Transport because there was none yet.");
                 }
 #if UNITY_EDITOR
@@ -297,7 +299,7 @@ namespace Mirror
             ConfigureServerFrameRate();
 
             // start listening to network connections
-            server.Listen(maxConnections);
+            _ = server.ListenAsync(maxConnections);
 
             // call OnStartServer AFTER Listen, so that NetworkServer.active is
             // true and we can call NetworkServer.Spawn in OnStartServer
@@ -354,39 +356,15 @@ namespace Mirror
             }
         }
 
-        /// <summary>
-        /// This starts a network client. It uses the networkAddress and networkPort properties as the address to connect to.
-        /// <para>This makes the newly created client connect to the server immediately.</para>
-        /// </summary>
-        public void StartClient(string serverIp)
+        public Task StartClient(string hostname)
         {
-            mode = NetworkManagerMode.ClientOnly;
-
-            Initialize();
-
-            if (authenticator != null)
+            var uriBuilder = new UriBuilder()
             {
-                authenticator.OnStartClient();
-                authenticator.OnClientAuthenticated += OnClientAuthenticated;
-            }
+                Scheme = "tcp4",
+                Host = hostname
+            };
 
-            if (runInBackground)
-                Application.runInBackground = true;
-
-            isNetworkActive = true;
-
-            RegisterClientMessages();
-
-            if (string.IsNullOrEmpty(serverIp))
-            {
-                Debug.LogError("serverIp shouldn't be empty");
-                return;
-            }
-            if (LogFilter.Debug) Debug.Log("NetworkManager StartClient address:" + serverIp);
-
-            _ = client.ConnectAsync(serverIp);
-
-            OnStartClient();
+            return StartClient(uriBuilder.Uri);
         }
 
         /// <summary>
@@ -394,11 +372,9 @@ namespace Mirror
         /// <para>This makes the newly created client connect to the server immediately.</para>
         /// </summary>
         /// <param name="uri">location of the server to connect to</param>
-        public void StartClient(Uri uri)
+        public async Task StartClient(Uri uri)
         {
             mode = NetworkManagerMode.ClientOnly;
-
-            Initialize();
 
             if (authenticator != null)
             {
@@ -417,7 +393,7 @@ namespace Mirror
 
             if (LogFilter.Debug) Debug.Log("NetworkManager StartClient address:" + uri);
 
-            _ = client.ConnectAsync(uri);
+            await client.ConnectAsync(uri);
 
             OnStartClient();
         }
@@ -678,8 +654,6 @@ namespace Mirror
 
                 DontDestroyOnLoad(gameObject);
             }                
-
-            Transport.activeTransport = transport;
         }
 
         void RegisterServerMessages()
@@ -766,10 +740,6 @@ namespace Mirror
             // Let server prepare for scene change
             OnServerChangeScene(newSceneName);
 
-            // Suspend the server's transport while changing scenes
-            // It will be re-enabled in FinishScene.
-            Transport.activeTransport.enabled = false;
-
             ClientScene.server = server;
             ClientScene.client = client;
 
@@ -801,7 +771,6 @@ namespace Mirror
             // the state as soon as the load is finishing, causing all kinds of bugs because of missing state.
             // (client may be null after StopClient etc.)
             if (LogFilter.Debug) Debug.Log("ClientChangeScene: pausing handlers while scene is loading to avoid data loss after scene was loaded.");
-            Transport.activeTransport.enabled = false;
 
             ClientScene.server = server;
             ClientScene.client = client;
@@ -890,7 +859,6 @@ namespace Mirror
 
             // process queued messages that we received while loading the scene
             if (LogFilter.Debug) Debug.Log("FinishLoadScene: resuming handlers after scene was loading.");
-            Transport.activeTransport.enabled = true;
 
             // host mode?
             if (mode == NetworkManagerMode.Host)

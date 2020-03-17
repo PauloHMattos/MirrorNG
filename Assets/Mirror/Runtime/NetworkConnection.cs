@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Mirror
 {
     /// <summary>
-    /// A High level network connection. This is used for connections from client-to-server and for connection from server-to-client.
+    /// A High level network connection. Responsible for sending and receiving messages
     /// </summary>
     /// <remarks>
     /// <para>A NetworkConnection corresponds to a specific connection for a host in the transport layer. It has a connectionId that is assigned by the transport layer and passed to the Initialize function.</para>
@@ -23,14 +25,9 @@ namespace Mirror
         Dictionary<int, NetworkMessageDelegate> messageHandlers;
 
         /// <summary>
-        /// Unique identifier for this connection that is assigned by the transport layer.
+        /// Transport connection
         /// </summary>
-        /// <remarks>
-        /// <para>On a server, this Id is unique for every connection on the server. On a client this Id is local to the client, it is not the same as the Id on the server for this connection.</para>
-        /// <para>Transport layers connections begin at one. So on a client with a single connection to a server, the connectionId of that connection will be one. In NetworkServer, the connectionId of the local connection is zero.</para>
-        /// <para>Clients do not know their connectionId on the server, and do not know the connectionId of other clients on the server.</para>
-        /// </remarks>
-        public readonly int connectionId;
+        public IConnection Connection { get; }
 
         /// <summary>
         /// Flag that indicates the client has been authenticated.
@@ -54,7 +51,7 @@ namespace Mirror
         /// The IP address / URL / FQDN associated with the connection.
         /// Can be useful for a game master to do IP Bans etc.
         /// </summary>
-        public abstract string address { get; }
+        public virtual EndPoint address => Connection.GetEndPointAddress();
 
         /// <summary>
         /// The last time that a message was received on this connection.
@@ -89,17 +86,9 @@ namespace Mirror
         /// <summary>
         /// Creates a new NetworkConnection with the specified address
         /// </summary>
-        internal NetworkConnection()
+        internal NetworkConnection(IConnection connection)
         {
-        }
-
-        /// <summary>
-        /// Creates a new NetworkConnection with the specified address and connectionId
-        /// </summary>
-        /// <param name="networkConnectionId"></param>
-        internal NetworkConnection(int networkConnectionId)
-        {
-            connectionId = networkConnectionId;
+            this.Connection = connection;
         }
 
         ~NetworkConnection()
@@ -127,7 +116,14 @@ namespace Mirror
         /// <summary>
         /// Disconnects this connection.
         /// </summary>
-        public abstract void Disconnect();
+        public virtual void Disconnect()
+        {
+            // set not ready and handle clientscene disconnect in any case
+            // (might be client or host mode here)
+            isReady = false;
+            RemoveObservers();
+            Connection.Disconnect();
+        }
 
         internal void SetHandlers(Dictionary<int, NetworkMessageDelegate> handlers)
         {
@@ -142,43 +138,41 @@ namespace Mirror
         /// <param name="msg">The message to send.</param>
         /// <param name="channelId">The transport layer channel to send on.</param>
         /// <returns></returns>
-        public bool Send<T>(T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
+        public void Send<T>(T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
             using (PooledNetworkWriter writer = NetworkWriterPool.GetWriter())
             {
                 // pack message and send allocation free
                 MessagePacker.Pack(msg, writer);
                 NetworkDiagnostics.OnSend(msg, channelId, writer.Position, 1);
-                return Send(writer.ToArraySegment(), channelId);
+                _ = SendAsync(writer.ToArraySegment(), channelId);
             }
         }
 
-        // internal because no one except Mirror should send bytes directly to
-        // the client. they would be detected as a message. send messages instead.
-        protected abstract bool Send(ArraySegment<byte> segment, int channelId = Channels.DefaultReliable);
+        protected virtual Task SendAsync(ArraySegment<byte> segment, int channelId = Channels.DefaultReliable)
+        {
+            if (logNetworkMessages) Debug.Log("ConnectionSend " + this + " bytes:" + BitConverter.ToString(segment.Array, segment.Offset, segment.Count));
+
+            return Connection.SendAsync(segment);
+        }
 
         public static void Send<T>(IEnumerable<NetworkConnection> connections, T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
             using (PooledNetworkWriter writer = NetworkWriterPool.GetWriter())
             {
-                // pack message into byte[] once
+                // pack message and send allocation free
                 MessagePacker.Pack(msg, writer);
                 var segment = writer.ToArraySegment();
 
                 int count = 0;
                 foreach (NetworkConnection connection in connections)
                 {
-                    connection.Send(segment, channelId);
+                    _ = connection.SendAsync(segment, channelId);
                     count++;
                 }
 
                 NetworkDiagnostics.OnSend(msg, channelId, segment.Count, count);
             }
-        }
-
-        public override string ToString()
-        {
-            return $"connection({connectionId})";
         }
 
         internal void AddToVisList(NetworkIdentity identity)
@@ -239,7 +233,7 @@ namespace Mirror
                 int msgType = MessagePacker.GetId(typeof(T).IsValueType ? typeof(T) : msg.GetType());
 
                 MessagePacker.Pack(msg, writer);
-                ArraySegment<byte> segment = writer.ToArraySegment();
+                var segment = writer.ToArraySegment();
                 using (PooledNetworkReader networkReader = NetworkReaderPool.GetReader(segment))
                     return InvokeHandler(msgType, networkReader, channelId);
             }

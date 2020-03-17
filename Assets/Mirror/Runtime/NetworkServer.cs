@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Threading.Tasks;
+using Mirror.Tcp2;
 using UnityEngine;
 
 namespace Mirror
@@ -31,6 +33,9 @@ namespace Mirror
         // The host client for this server 
         public NetworkClient localClient;
 
+        // the transport for this server
+        public Transport2 Transport2;
+
         /// <summary>
         /// True if there is a local client connected to this server (host mode)
         /// </summary>
@@ -39,7 +44,7 @@ namespace Mirror
         /// <summary>
         /// A list of local connections on the server.
         /// </summary>
-        public readonly Dictionary<int, NetworkConnectionToClient> connections = new Dictionary<int, NetworkConnectionToClient>();
+        public readonly HashSet<NetworkConnectionToClient> connections = new HashSet<NetworkConnectionToClient>();
 
         /// <summary>
         /// <para>Dictionary of the message handlers registered with the server.</para>
@@ -87,13 +92,8 @@ namespace Mirror
                     // we do NOT call Transport.Shutdown, because someone only
                     // called NetworkServer.Shutdown. we can't assume that the
                     // client is supposed to be shut down too!
-                    Transport.activeTransport.ServerStop();
+                    Transport2.Disconnect();
                 }
-
-                Transport.activeTransport.OnServerDisconnected.RemoveListener(OnDisconnected);
-                Transport.activeTransport.OnServerConnected.RemoveListener(OnConnected);
-                Transport.activeTransport.OnServerDataReceived.RemoveListener(OnDataReceived);
-                Transport.activeTransport.OnServerError.RemoveListener(OnError);
 
                 initialized = false;
             }
@@ -114,10 +114,12 @@ namespace Mirror
 
             //Make sure connections are cleared in case any old connections references exist from previous sessions
             connections.Clear();
+            RegisterMessageHandlers();
+            /*
             Transport.activeTransport.OnServerDisconnected.AddListener(OnDisconnected);
             Transport.activeTransport.OnServerConnected.AddListener(OnConnected);
             Transport.activeTransport.OnServerDataReceived.AddListener(OnDataReceived);
-            Transport.activeTransport.OnServerError.AddListener(OnError);
+            Transport.activeTransport.OnServerError.AddListener(OnError);*/
         }
 
 
@@ -134,20 +136,32 @@ namespace Mirror
         /// </summary>
         /// <param name="maxConns">Maximum number of allowed connections</param>
         /// <returns></returns>
-        public void Listen(int maxConns)
+        public async Task ListenAsync(int maxConns)
         {
             Initialize();
             maxConnections = maxConns;
+            active = true;
 
             // only start server if we want to listen
             if (!dontListen)
             {
-                Transport.activeTransport.ServerStart();
+                await Transport2.ListenAsync();
                 if (LogFilter.Debug) Debug.Log("Server started listening");
-            }
 
-            active = true;
-            RegisterMessageHandlers();
+                _ = AcceptAsync();
+            }
+        }
+
+        private async Task AcceptAsync()
+        {
+            while (true)
+            {
+                IConnection connection = await Transport2.AcceptAsync();
+                // someone just connected.
+                var connectionToClient = new NetworkConnectionToClient(connection);
+
+                AddConnection(connectionToClient);
+            }
         }
 
         /// <summary>
@@ -156,28 +170,10 @@ namespace Mirror
         /// </summary>
         /// <param name="conn">Network connection to add.</param>
         /// <returns>True if added.</returns>
-        public bool AddConnection(NetworkConnectionToClient conn)
+        internal void AddConnection(NetworkConnectionToClient conn)
         {
-            if (!connections.ContainsKey(conn.connectionId))
-            {
-                // connection cannot be null here or conn.connectionId
-                // would throw NRE
-                connections[conn.connectionId] = conn;
-                conn.SetHandlers(handlers);
-                return true;
-            }
-            // already a connection with this id
-            return false;
-        }
-
-        /// <summary>
-        /// This removes an external connection added with AddExternalConnection().
-        /// </summary>
-        /// <param name="connectionId">The id of the connection to remove.</param>
-        /// <returns>True if the removal succeeded</returns>
-        public bool RemoveConnection(int connectionId)
-        {
-            return connections.Remove(connectionId);
+            connections.Add(conn);
+            conn.SetHandlers(handlers);
         }
 
         // called by LocalClient to add itself. dont call directly.
@@ -197,11 +193,11 @@ namespace Mirror
         {
             if (localConnection != null)
             {
+                connections.Remove(localConnection);
                 localConnection.Disconnect();
                 localConnection.Dispose();
                 localConnection = null;
             }
-            RemoveConnection(0);
             this.localClient = null;
         }
 
@@ -240,7 +236,8 @@ namespace Mirror
         public void SendToAll<T>(T msg, int channelId = Channels.DefaultReliable) where T : IMessageBase
         {
             if (LogFilter.Debug) Debug.Log("Server.SendToAll id:" + typeof(T));
-            NetworkConnection.Send(connections.Values, msg, channelId);
+
+            NetworkConnection.Send(connections, msg, channelId);
         }
 
         /// <summary>
@@ -304,11 +301,11 @@ namespace Mirror
         /// </summary>
         public void DisconnectAllConnections()
         {
-            foreach (NetworkConnection conn in connections.Values)
+            foreach (NetworkConnection conn in connections)
             {
                 conn.Disconnect();
                 // call OnDisconnected unless local player in host mode
-                if (conn.connectionId != 0)
+                if (conn != localConnection)
                     OnDisconnected(conn);
                 conn.Dispose();
             }
@@ -337,65 +334,41 @@ namespace Mirror
             }
         }
 
-        void OnConnected(int connectionId)
+        internal void OnConnected(NetworkConnectionToClient connection)
         {
-            if (LogFilter.Debug) Debug.Log("Server accepted client:" + connectionId);
-
-            // connectionId needs to be > 0 because 0 is reserved for local player
-            if (connectionId <= 0)
-            {
-                Debug.LogError("Server.HandleConnect: invalid connectionId: " + connectionId + " . Needs to be >0, because 0 is reserved for local player.");
-                Transport.activeTransport.ServerDisconnect(connectionId);
-                return;
-            }
+            if (LogFilter.Debug) Debug.Log("Server accepted client:" + connection);
 
             // connectionId not in use yet?
-            if (connections.ContainsKey(connectionId))
+            if (connections.Contains(connection))
             {
-                Transport.activeTransport.ServerDisconnect(connectionId);
-                if (LogFilter.Debug) Debug.Log("Server connectionId " + connectionId + " already in use. kicked client:" + connectionId);
-                return;
+                connection.Disconnect();
+                throw new ConnectionException("Server connection already in use. kicked client", connection);
+            }
+            if (connections.Count > maxConnections)
+            {
+                connection.Disconnect();
+                throw new ConnectionException("server full, kicked client", connection);
             }
 
-            // are more connections allowed? if not, kick
-            // (it's easier to handle this in Mirror, so Transports can have
-            //  less code and third party transport might not do that anyway)
-            // (this way we could also send a custom 'tooFull' message later,
-            //  Transport can't do that)
-            if (connections.Count < maxConnections)
-            {
-                // add connection
-                var conn = new NetworkConnectionToClient(connectionId);
-                OnConnected(conn);
-            }
-            else
-            {
-                // kick
-                Transport.activeTransport.ServerDisconnect(connectionId);
-                if (LogFilter.Debug) Debug.Log("Server full, kicked client:" + connectionId);
-            }
-        }
-
-        internal void OnConnected(NetworkConnectionToClient conn)
-        {
-            if (LogFilter.Debug) Debug.Log("Server accepted client:" + conn);
+            if (LogFilter.Debug) Debug.Log("Server accepted client:" + connection);
 
             // add connection and invoke connected event
-            AddConnection(conn);
-            conn.InvokeHandler(new ConnectMessage(), -1);
+            AddConnection(connection);
+            connection.InvokeHandler(new ConnectMessage(), -1);
+
         }
 
-        void OnDisconnected(int connectionId)
+
+        void OnDisconnected(NetworkConnectionToClient connection)
         {
-            if (LogFilter.Debug) Debug.Log("Server disconnect client:" + connectionId);
+            if (LogFilter.Debug) Debug.Log("Server disconnect client:" + connection);
 
-            if (connections.TryGetValue(connectionId, out NetworkConnectionToClient conn))
+            if (connections.Remove(connection))
             {
-                conn.Disconnect();
-                RemoveConnection(connectionId);
-                if (LogFilter.Debug) Debug.Log("Server lost client:" + connectionId);
+                connection.Disconnect();
+                if (LogFilter.Debug) Debug.Log("Server lost client:" + connection);
 
-                OnDisconnected(conn);
+                OnDisconnected(connection);
             }
         }
 
@@ -403,18 +376,6 @@ namespace Mirror
         {
             conn.InvokeHandler(new DisconnectMessage(), -1);
             if (LogFilter.Debug) Debug.Log("Server lost client:" + conn);
-        }
-
-        void OnDataReceived(int connectionId, ArraySegment<byte> data, int channelId)
-        {
-            if (connections.TryGetValue(connectionId, out NetworkConnectionToClient conn))
-            {
-                conn.TransportReceive(data, channelId);
-            }
-            else
-            {
-                Debug.LogError("HandleData Unknown connectionId:" + connectionId);
-            }
         }
 
         void OnError(int connectionId, Exception exception)
@@ -746,7 +707,7 @@ namespace Mirror
         /// </summary>
         public void SetAllClientsNotReady()
         {
-            foreach (NetworkConnection conn in connections.Values)
+            foreach (NetworkConnection conn in connections)
             {
                 SetClientNotReady(conn);
             }
